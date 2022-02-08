@@ -165,9 +165,22 @@ original_race_lms <- lapply(group_split(predictions_long, variable, race), funct
 
 Bootstrap sampling census blocks, building regression models with each set; repeat 500 tiems
 
-### --> sample w/o replacement? 
+### --> SIZE of m? 
+### --> sample w/o replacement?     
+1. randomly sample m census blocks ??___WITHOUT__ replacement, where $m = 2\sqrt n$, 500 replicates 
+
 ### --> calculate CI as: boot_mean +- boot_se*t_statistic ? or the estimated CI from each simulation? same results?
 ### --> use t_score <- qt(p = 0.05/2, df = m-1, lower.tail = F) instead of 1.96?
+
+### --> ?   
+2. run regression models with each bootstrap sample 
+
+2. calculate the mean SE from the bootstrapped sample results 
+
+### --> use the bootstrapped mean coefficient estimate here as well (vs estimate from traditional regression)?   
+2. calculate the bootstrapped CI:
+
+$$CI = \bar X \pm t_{\alpha/2, N-1}SE_{\bar X} $$
 
 
 ```{r}
@@ -197,6 +210,7 @@ bootstrap_lm <- function(dt = predictions_long, boot_sample_size=m) {
 
  
 # calculate the 95% CI
+
 ## tutorial: https://bookdown.org/logan_kelly/r_practice/p09.html 
   
 #### --> ????
@@ -259,9 +273,6 @@ ggplot(all_lms, aes(x = estimate,
  
 
 
-
-
-
 ```{r}
 knitr::knit_exit()
 ```
@@ -276,49 +287,18 @@ knitr::knit_exit()
 
 
 
-## m out of n bootstrap 
+ 
 
-approach: 
-[example](https://www.statology.org/bootstrap-standard-error-in-r/)
-
-
-### --> does m hve to be this size (~268 replicas)?    
-1. randomly sample m census blocks with replacement, where $m = 2\sqrt n$
-
-```{r}
-### --> ? right? the SD and n are calculated based on the bootstrap sample, Not the full sample SD or N? 
-
-### --> calculate for each pollutant and race individually? 
-
-```
-
-### --> **OR** do i build regression models w/ each bootstrapped census block sample; take the avg of all of the estimated SEs? afterwards, fit a normal regression line to calculate the mean coefficient estimates using all the data. calculate CIs using the bootstrapped SEs, not the default SEs.
-
-```{r}
-# 2. for each pollutant, and race calculate the SE based on that sample's SD ($\hat\sigma$) and size ($m$), as:
-# 
-# $$SE_{\bar X} = \frac{\hat\sigma}{\sqrt n}$$
-
-```
-
-3. replicate this 500 times 
-
-
-4. calculate the average SE of all the replications & the associated 95% confidence intervals: 
-
-### --> right ???
-
-$$CI = \bar X \pm t_{\alpha/2, N-1}SE_{\bar X} $$
 
 
 
  
 
+
+
+```{r, eval=F}
+
 ###--> ??? how to calculat SE for each group race?? 
-
-
-```{r}
-
 
 
 bootstrap_se <- lapply(group_split(predictions_long, variable, race) , function (x) {
@@ -371,37 +351,7 @@ bootstrap_se
 
 
 
-
-
-
-
-```{r, eval=F}
-# example: https://thestatsgeek.com/2013/07/02/the-miracle-of-the-bootstrap/ 
-# INPUTS
-## d: a data vector
-## i: indices to be sampled
-
-boot_mean <- function(d, i) {mean(d[i])}
-
-lapply(unique_pollutants, function(x) {
-  # x=unique_pollutants[1]
-  
-  # block predictions to sample from
-  d_vector = filter(predictions, variable == x) %>% pull(prediction)
-  # number of blocks to sample
-  i = m
-  
-  bs <- boot(data = d_vector, statistic = boot_mean, R = replicate_n)
-  bs
-  
-  
-})
-
-
-
-```
-
-
+ 
 
 
  
