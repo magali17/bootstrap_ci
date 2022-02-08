@@ -1,0 +1,407 @@
+---
+title: "M-out-of-N Bootstrap"
+author: "Magali Blanco"
+date: ' `r Sys.time()` '
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '3'
+    number_sections: true
+    toc_float: true
+    collapsed: false
+    smooth_scroll: false
+editor_options: 
+  chunk_output_type: console
+---
+
+**Purpose**
+
+* The purpose of this script is to geneate m-ou-of-n bootstrap standard error estimates for linear regression models of the mean pollutant concentration in a block based on the proportion of each race within that block, such that: 
+
+$pollutant\ conc = \beta_1 X_{race-ethnicity\ pct}   $
+
+* We will take an m-ou-of-n bootstrap approach. The general approach here is: 
+
+
+
+
+$SE = \frac{\s}{\sqrt n}$
+
+where $s$ is the standard deviation from the ____??? bootstrap sample, and ___??? $n$ is the bootstrap sample size
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, 
+                      cache=F, cache.comments = F, 
+                      message = F, warning = F#, tidy.opts=list(width.cutoff=60), tidy=TRUE, fig.height = 10, fig.width = 10
+                      )  
+
+
+# Clear workspace of all objects and unload all extra (non-base) packages
+rm(list = ls(all = TRUE))
+if (!is.null(sessionInfo()$otherPkgs)) {
+  res <- suppressWarnings(
+    lapply(paste('package:', names(sessionInfo()$otherPkgs), sep=""),
+           detach, character.only=TRUE, unload=TRUE, force=TRUE))
+}
+
+pacman::p_load(#kableExtra, 
+               tidyverse,
+               #boot #bootstrap fn
+               broom
+               )
+
+set.seed(1)
+
+#prevent scientific notation
+options(scipen=999)
+
+```
+
+# Load Data 
+
+```{r}
+# load data 
+## census data
+census_file <- file.path("..", "..", "dr0342_census_block")
+if(file.exists(paste0(census_file, ".rda"))) {
+  census <- readRDS(paste0(census_file, ".rda"))
+  } else {
+    census <- read.csv(paste0(census_file, ".csv")) %>% select(-X)
+    saveRDS(census, paste0(census_file, ".rda"))
+    }
+
+#pollutants of interest
+unique_pollutants <- c("pnc_noscreen", "ma200_ir_bc1", "no2", "pm2.5_ug_m3") #unique(predictions$variable)
+
+
+
+## model predictions for air pollution
+predictions0 <- readRDS(file.path("..", "..", "Block Predictions", "20220207", "predictions.rda")) %>%
+  # only keep predictions in the modeing area
+  filter(in_monitoring_area ==TRUE,
+         variable %in% unique_pollutants
+         ) %>%
+  select(-c(in_monitoring_area, annual, msa)) %>%
+  # kaya does this - don't need to do this, though?
+  mutate(block_key = as.numeric(substr(native_id, 1, 15)))
+
+
+## ??? these have different number of unique block_key values?? 
+## merge by block_key ???
+
+```
+
+### --> ?? block_key is native_id? 
+### --> why are there 10k block_keys but 15k native_id and location_id values? use native_id?
+
+### --> why are there blocks w/ missing race data?? is the merging wrong?
+
+```{r}
+race_variables <- c("bk_p_race_asian", "bk_p_race_black", "bk_p_ethn_hisp", "bk_p_ethn_non_hisp_white")
+
+
+### length(unique(predictions0$block_key)) # 29,521
+### length(unique(census$block_key)) # 195,574
+#merge by "block_key"
+
+predictions <- left_join(predictions0, census) %>%
+  
+  ### ---> FIX THIS LATER. there shouldn't be any blocks w/ missing data (?)
+  drop_na()
+
+predictions_long <- predictions %>%
+  select(block_key, variable, prediction, all_of(race_variables)) %>%
+  gather("race", "race_prop", race_variables)
+
+```
+
+
+### --> souldnt the number of unique blcoks be 15k (not 10k)? 
+
+```{r}
+# common variables
+
+#predictions %>% group_by(block_key) %>% mutate(n=n()) %>% filter(n>4) %>% View()
+  
+#unique blocks 
+unique_blocks <- unique(predictions$block_key)
+# total number of blocks #10k
+n_blocks <- length(unique_blocks)
+# blocks to sample in each replication 
+m <- 2*sqrt(n_blocks) %>% round()
+# number of bootstrap samples to take
+replicate_n <- 100#500
+
+```
+
+# Linear regression models 
+
+## air pollution ~ race 
+
+### --> why are my estimates different than Kaya's? she needs winsorized means? 
+
+```{r}
+#original Lms 
+
+original_race_lms <- lapply(group_split(predictions_long, variable, race), function(x){
+  # x = group_split(predictions_long, variable, race)[[1]]
+  
+  lm1 <- lm(prediction~race_prop, data=x) %>%
+    tidy(conf.int=T) %>%  
+    mutate(
+      variable = first(x$variable),
+      race = first(x$race)
+    )
+  }) %>%
+  bind_rows() %>%
+  filter(term != "(Intercept)") %>%
+  mutate(SE = "standard")
+
+```
+
+ 
+
+Bootstrap sampling census blocks, building regression models with each set; repeat 500 tiems
+
+### --> sample w/o replacement? 
+### --> calculate CI as: boot_mean +- boot_se*t_statistic ? or the estimated CI from each simulation? same results?
+### --> use t_score <- qt(p = 0.05/2, df = m-1, lower.tail = F) instead of 1.96?
+
+
+```{r}
+#dt = predictions_long
+# boot_sample_size=m
+
+bootstrap_lm <- function(dt = predictions_long, boot_sample_size=m) {
+  
+  block_sample <- sample(unique(dt$block_key), size = boot_sample_size, replace = F)
+  temp_df <- filter(dt, block_key %in% block_sample)
+
+  lms <- lapply(group_split(temp_df, variable, race), function(x){
+
+    lm(prediction~race_prop, data= x) %>%
+    tidy() %>%
+    mutate(
+      variable = first(x$variable),
+      race = first(x$race)
+    )
+  }) %>%
+  bind_rows() %>%
+  filter(term != "(Intercept)") 
+
+  return(lms)
+  
+}
+
+ 
+# calculate the 95% CI
+## tutorial: https://bookdown.org/logan_kelly/r_practice/p09.html 
+  
+#### --> ????
+t_score <- qt(p = 0.05/2, df = m-1, lower.tail = F)
+
+# sample a subset of blocks 500 times, run a model each time for each pollutant & race; calculate the mean SE & confidence interval
+
+boot_race_lms <- replicate(replicate_n, 
+          expr = bootstrap_lm(), 
+          simplify = F) %>%
+  bind_rows() %>%
+  group_by(variable, race) %>%
+  summarize(
+    #need this??
+    estimate = mean(estimate),
+    
+    std.error = mean(std.error)
+    ) %>%
+  mutate(
+    conf.low = estimate - t_score*std.error,
+    conf.high = estimate + t_score*std.error
+  ) %>%
+  mutate(SE = "boot")
+
+
+```
+
+merge results 
+
+```{r}
+all_lms <- original_race_lms %>%
+  select(variable, race, estimate, std.error, conf.low, conf.high, SE) %>%
+  bind_rows(boot_race_lms)  
+
+```
+
+
+plot
+ 
+```{r}
+# d <- tidy(mod, conf.int = TRUE)
+# 
+pd <- position_dodge(0.4)
+
+ggplot(all_lms, aes(x = estimate, 
+                    y=race,
+                    #y = SE, 
+                    col=SE,
+                    xmin = conf.low, xmax = conf.high, height = 0,
+                    )) +
+  facet_grid(cols = vars(variable), scales="free") +
+  geom_vline(xintercept = 0, lty = 2, alpha=0.5) +
+  geom_point(position = pd) +
+  geom_errorbarh(position = pd)
+
+```
+
+
+
+ 
+
+
+
+
+
+```{r}
+knitr::knit_exit()
+```
+
+
+
+
+
+
+
+
+
+
+
+## m out of n bootstrap 
+
+approach: 
+[example](https://www.statology.org/bootstrap-standard-error-in-r/)
+
+
+### --> does m hve to be this size (~268 replicas)?    
+1. randomly sample m census blocks with replacement, where $m = 2\sqrt n$
+
+```{r}
+### --> ? right? the SD and n are calculated based on the bootstrap sample, Not the full sample SD or N? 
+
+### --> calculate for each pollutant and race individually? 
+
+```
+
+### --> **OR** do i build regression models w/ each bootstrapped census block sample; take the avg of all of the estimated SEs? afterwards, fit a normal regression line to calculate the mean coefficient estimates using all the data. calculate CIs using the bootstrapped SEs, not the default SEs.
+
+```{r}
+# 2. for each pollutant, and race calculate the SE based on that sample's SD ($\hat\sigma$) and size ($m$), as:
+# 
+# $$SE_{\bar X} = \frac{\hat\sigma}{\sqrt n}$$
+
+```
+
+3. replicate this 500 times 
+
+
+4. calculate the average SE of all the replications & the associated 95% confidence intervals: 
+
+### --> right ???
+
+$$CI = \bar X \pm t_{\alpha/2, N-1}SE_{\bar X} $$
+
+
+
+ 
+
+###--> ??? how to calculat SE for each group race?? 
+
+
+```{r}
+
+
+
+bootstrap_se <- lapply(group_split(predictions_long, variable, race) , function (x) {
+  # x = group_split(predictions_long, variable, race)[[1]]
+  
+  # returns a matrix where rows are # blocks sampled, columns are the replicates
+  bs_samples <- replicate(replicate_n, sample(x =x$race_prop, size = m, replace = T))
+  
+  # ??? calculate the SE of each replicate, then take the mean of all the replicates
+  ## length(y) = m here
+  bs_se <- apply(bs_samples, 2, function(y) { sqrt(var(y)/length(y))}) %>%
+    mean()
+  
+  # overall mean proportion 
+  bs_mean <- mean(bs_samples)
+  
+  
+  
+  
+  # calculate the 95% CI
+  ## tutorial: https://bookdown.org/logan_kelly/r_practice/p09.html 
+  
+  #### --> ????
+  ## 1.97 , not 1.96 ??
+  t_score <- qt(p = 0.05/2, df = m-1, lower.tail = F)
+  margin_error <- t_score*bs_se
+  
+  #CI
+  ci_lower_bound = bs_mean - margin_error
+  ci_upper_bound = bs_mean + margin_error
+  
+  #return the results as a data frame
+  data.frame(
+    variable = first(x$variable),
+    race = first(x$race),
+    bs_mean = bs_mean,
+    bs_se = bs_se,
+    ci_lower_bound = ci_lower_bound,
+    ci_upper_bound = ci_upper_bound
+  )
+  }) %>%
+  bind_rows()
+
+bootstrap_se
+
+```
+
+
+ 
+
+
+
+
+
+
+
+```{r, eval=F}
+# example: https://thestatsgeek.com/2013/07/02/the-miracle-of-the-bootstrap/ 
+# INPUTS
+## d: a data vector
+## i: indices to be sampled
+
+boot_mean <- function(d, i) {mean(d[i])}
+
+lapply(unique_pollutants, function(x) {
+  # x=unique_pollutants[1]
+  
+  # block predictions to sample from
+  d_vector = filter(predictions, variable == x) %>% pull(prediction)
+  # number of blocks to sample
+  i = m
+  
+  bs <- boot(data = d_vector, statistic = boot_mean, R = replicate_n)
+  bs
+  
+  
+})
+
+
+
+```
+
+
+
+
+ 
