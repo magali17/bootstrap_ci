@@ -1,0 +1,355 @@
+---
+title: "M-out-of-N Bootstrap"
+author: "Magali Blanco"
+date: ' `r Sys.time()` '
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '3'
+    number_sections: true
+    toc_float: true
+    collapsed: false
+    smooth_scroll: false
+editor_options: 
+  chunk_output_type: console
+---
+
+**Purpose**
+
+* The purpose of this script is to geneate m-ou-of-n bootstrap standard error estimates for linear regression models of the mean pollutant concentration in a block based on the proportion of each race within that block, such that: 
+
+$$pollutant\ conc = \beta_1 X_{race-ethnicity\ pct}$$
+
+* We will take an m-ou-of-n bootstrap approach. The general approach here is: 
+
+
+
+
+$SE = \frac{\hat\sigma}{\sqrt n}$
+
+where $s$ is the standard deviation from the ____??? bootstrap sample, and ___??? $n$ is the bootstrap sample size
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, 
+                      cache=F, cache.comments = F, 
+                      message = F, warning = F, tidy.opts=list(width.cutoff=60), tidy=TRUE, 
+                      fig.height = 6, fig.width = 10
+                      )  
+
+
+# Clear workspace of all objects and unload all extra (non-base) packages
+rm(list = ls(all = TRUE))
+if (!is.null(sessionInfo()$otherPkgs)) {
+  res <- suppressWarnings(
+    lapply(paste('package:', names(sessionInfo()$otherPkgs), sep=""),
+           detach, character.only=TRUE, unload=TRUE, force=TRUE))
+}
+
+pacman::p_load(#kableExtra, 
+               tidyverse,
+               #boot #bootstrap fn
+               broom
+               )
+
+set.seed(1)
+
+#prevent scientific notation
+options(scipen=999)
+
+image_path <- file.path("..", "Manuscript", "Images")
+
+#add legends to bottom of plots
+#theme_update(legend.position="bottom")
+
+```
+
+# Functions
+
+```{r}
+# function returns dataframe with appropriate labels 
+
+add_labels <- function(dt, var = "variable", race_var = "race", keep_original_var=TRUE) {
+  
+  dt <- dplyr::rename(dt, var=var,
+                      race_var = race_var
+  )
+  
+  if(keep_original_var==TRUE){
+    dt <- mutate(dt,
+                 var0 = var,
+                 race_var0 = race_var
+    )
+    }
+  
+  dt <- dt %>%
+      mutate(
+        # pollutants 
+        var = recode_factor(factor(var),
+                            "co2_umol_mol" = "CO2 (ppm)",
+                            "ma200_ir_bc1" = "BC (ng/m3)",
+                            "pm2.5_ug_m3" = "PM2.5 (ug/m3)",
+                            "no2" = "NO2 (ppb)",
+                            "pnc_noscreen" = "PNC (pt/cm3)",
+                            ),
+         var = factor(var, levels = c("PNC (pt/cm3)",
+                                      "BC (ng/m3)",
+                                      "NO2 (ppb)",
+                                      "PM2.5 (ug/m3)",
+                                      "CO2 (ppm)")),
+         
+         #race-ethnicity groups
+         race_var = recode_factor(factor(race_var),
+                        "bk_p_race_asian" = "Asian",
+                        "bk_p_race_black" = "Black",
+                        "bk_p_ethn_hisp" = "Hispanic",
+                        "bk_p_ethn_non_hisp_white" = "Non-Hispanic White"),
+         race_var = factor(race_var, levels = c("Asian", "Black", "Hispanic", "Non-Hispanic White"))
+        )
+  
+  names(dt)[names(dt) == "var"] <- var
+  names(dt)[names(dt) == "race_var"] <- race_var
+  
+  return(dt)
+  
+  }
+  
+
+```
+
+
+# Load Data 
+
+```{r}
+# load data 
+## census data
+census_file <- file.path("..", "..", "dr0342_census_block")
+if(file.exists(paste0(census_file, ".rda"))) {
+  census <- readRDS(paste0(census_file, ".rda"))
+  } else {
+    census <- read.csv(paste0(census_file, ".csv")) %>% select(-X)
+    saveRDS(census, paste0(census_file, ".rda"))
+    }
+
+#pollutants of interest
+unique_pollutants <- c("pnc_noscreen", "ma200_ir_bc1", "no2", "pm2.5_ug_m3") #unique(predictions$variable)
+
+## model predictions for air pollution
+predictions0 <- readRDS(file.path("..", "..", "Block Predictions", "20220207", "predictions.rda")) %>%
+  # only keep predictions in the modeing area
+  filter(in_monitoring_area ==TRUE,
+         variable %in% unique_pollutants) %>%
+  select(-c(in_monitoring_area, annual, msa)) %>%
+  # there were some differences between the originally available 2000 census block IDs and the 2010 census block IDs used in this analysis. this addresses that.
+  mutate(block_key = as.numeric(substr(native_id, 1, 15)))
+
+
+race_variables <- c("bk_p_race_asian", "bk_p_race_black", "bk_p_ethn_hisp", "bk_p_ethn_non_hisp_white")
+
+
+### length(unique(predictions0$block_key)) # 29,521
+### length(unique(census$block_key)) # 195,574
+#merge by "block_key"
+
+predictions <- left_join(predictions0, census) %>%
+  # some blocks have NAs because nobody lives there (e.g., national parks)
+  drop_na()
+
+predictions_long <- predictions %>%
+  select(block_key, variable, prediction, all_of(race_variables)) %>%
+  gather("race", "race_prop", race_variables) 
+```
+
+
+```{r, eval=F}
+# TEMP
+# map showing blocks w/ NAs
+predictions %>%
+  mutate(has_na = is.na(bk_p_race_black)) %>%
+           ggplot(aes(x=longitude, y=latitude, col=has_na)) + 
+           geom_point()
+         
+         
+         
+```
+
+
+```{r}
+# common variables
+
+#unique blocks 
+unique_blocks <- unique(predictions$block_key)
+# total number of blocks #10k
+n_blocks <- length(unique_blocks)
+# blocks to sample in each replication 
+m <- 2*sqrt(n_blocks) %>% round()
+#m <- 1*sqrt(n_blocks) %>% round()
+# number of bootstrap samples to take
+replicate_n <- 500  
+
+```
+
+
+
+# Linear regression models
+
+## air pollution ~ race 
+
+```{r}
+#original Lms 
+
+original_race_lms <- lapply(group_split(predictions_long, variable, race), function(x){
+  # x = group_split(predictions_long, variable, race)[[1]]
+  
+  lm1 <- lm(prediction~race_prop, data=x) %>%
+    tidy(conf.int=T) %>%  
+    mutate(
+      variable = first(x$variable),
+      race = first(x$race)
+    )
+  }) %>%
+  bind_rows() %>%
+  filter(term != "(Intercept)") %>%
+  mutate(CI = "standard")
+
+```
+
+ 
+
+Approach for m-of-n bootstrap linear regression models:  
+
+### --> SIZE of m? 
+
+1. randomly sample m census blocks with replacement, where $m = 2\sqrt n$. Conduct 500 bootstrap sample replicates. 
+2. run the appropriate pollution regression models with each bootstrap sample 
+
+3. calculate the mean and 95% confidence interval for each race-ethnicity pollution model as the mean, 2.5th, and 97.5th quantile of the 500 bootstrapped coefficient estimates 
+
+
+
+```{r}
+
+bootstrap_lm <- function(dt = predictions_long, boot_sample_size=m) {
+  
+  block_sample <- sample(unique(dt$block_key), size = boot_sample_size, replace = T)
+  temp_df <- filter(dt, block_key %in% block_sample)
+
+  lms <- lapply(group_split(temp_df, variable, race), function(x){
+
+    lm(prediction~race_prop, data= x) %>%
+    tidy(conf.int=T) %>%
+    mutate(
+      variable = first(x$variable),
+      race = first(x$race)
+    )
+  }) %>%
+  bind_rows() %>%
+  filter(term != "(Intercept)") 
+
+  return(lms)
+  
+}
+
+ 
+# calculate the 95% CI
+set.seed(1)
+boot_race_lms0 <- replicate(replicate_n, 
+          expr = bootstrap_lm(), 
+          simplify = F) %>%
+  bind_rows() 
+
+boot_race_lms <- boot_race_lms0 %>%
+  group_by(variable, race) %>%
+  summarize(
+    # estimate using the coefficient estimates
+    conf.low = quantile(estimate, 0.025),
+    conf.high = quantile(estimate, 0.975),
+    
+    estimate = mean(estimate),
+    
+    # pulling the SE approach
+    #std.error = mean(std.error),
+    # # this produces very similar results are below (estiamte +- t-score*se)
+    # conf.low2 = mean(conf.low),
+    # conf.high2 = mean(conf.high)
+    ) %>%
+  mutate(CI = "bootstrapped") 
+   
+#merge results 
+all_lms <- original_race_lms %>%
+  select(variable, race, estimate, #std.error, 
+         conf.low, conf.high, CI) %>%
+  bind_rows(boot_race_lms)  %>%
+  add_labels(keep_original_var = F)
+
+
+```
+
+
+```{r}
+pd <- position_dodge(0.4)
+
+```
+
+bootstrapped esimate and CIs
+
+```{r}
+all_lms %>%
+  filter(CI == "bootstrapped") %>% 
+  ggplot(., aes(x = estimate, y=race, #col=CI,
+                col=variable,
+                    xmin = conf.low, xmax = conf.high, height = 0,
+                    )) +
+  facet_grid(cols = vars(variable), rows = vars(race), scales="free", switch="y") +
+  geom_vline(xintercept = 0, lty = 2, alpha=0.5) +
+  geom_point(position = pd) +
+  geom_errorbarh(position = pd) + 
+  theme(legend.position = "none") +
+  labs(y ="Race-Ethnicity (%)", x = "Coefficient Estimate"#, #col= "95% CI"
+       ) +
+  scale_y_discrete(labels=NULL, breaks=NULL)
+
+ggsave(file.path(image_path, "race_boot_lms.png"),width = 8, height = 6)
+
+```
+
+
+Comparison plot of bootstrapped and standared 95% confidence intervals
+ 
+```{r}
+
+ggplot(all_lms, aes(x = estimate, y=race, col=CI,
+                    xmin = conf.low, xmax = conf.high, height = 0,
+                    )) +
+  facet_grid(cols = vars(variable), rows = vars(race), scales="free", switch="y") +
+  geom_vline(xintercept = 0, lty = 2, alpha=0.5) +
+  geom_point(position = pd) +
+  geom_errorbarh(position = pd) + 
+  labs(y ="Race-Ethnicity (%)", x = "Coefficient Estimate", col= "95% CI") +
+  scale_y_discrete(labels=NULL, breaks=NULL)
+
+ggsave(file.path(image_path, "comparison.png"),width = 8, height = 6)
+
+```
+
+
+
+ 
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+knitr::knit_exit()
+```
+
+
+
